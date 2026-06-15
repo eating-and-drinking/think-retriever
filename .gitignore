@@ -1,0 +1,42 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Model outputs and checkpoints
+outputs/
+results/
+*.bin
+*.safetensors
+*.pt
+*.pth
+
+# Data and indices
+data/faiss_index/
+data/**/*.jsonl
+!data/sample/*.jsonl
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# WandB
+wandb/
+.wandb/
+
+# Misc
+.DS_Store
+*.log

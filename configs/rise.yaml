@@ -1,0 +1,205 @@
+# configs/rise.yaml
+# ─────────────────────────────────────────────────────────────
+# RISE: Retrieval-Integrated Stochastic Exploration
+# Best Paper Configuration
+# ─────────────────────────────────────────────────────────────
+
+# Inherit base model and data settings
+model:
+  name_or_path: "Qwen/Qwen2.5-7B-Instruct"
+  torch_dtype: "bfloat16"
+  attn_implementation: "flash_attention_2"
+  trust_remote_code: true
+
+data:
+  train_path: "data/hotpot/train.jsonl"
+  eval_path: "data/hotpot/eval.jsonl"
+  max_prompt_length: 512
+  max_completion_length: 1024
+  question_field: "question"
+  answer_field: "answer"
+
+retriever:
+  type: "bm25"
+  corpus_path: "data/hotpot/corpus.jsonl"
+  top_k: 3
+
+# ── RISE-specific Configuration ───────────────────────────────
+
+rise:
+  enabled: true
+  
+  # ═══════════════════════════════════════════════════════════
+  # 1. DIG: Differential Information Gain
+  # ═══════════════════════════════════════════════════════════
+  dig:
+    entropy_weight: 1.0        # w_1: Entropy reduction importance
+    confidence_weight: 0.5     # w_2: Confidence gain importance
+    embedding_weight: 0.3      # w_3: Embedding certainty importance
+    min_ig_threshold: 0.1      # Minimum IG to consider retrieval useful
+  
+  # ═══════════════════════════════════════════════════════════
+  # 2. AMOR: Adaptive Multi-Objective Reward
+  # ═══════════════════════════════════════════════════════════
+  amor:
+    budget_constraint: 3.0     # Expected max retrievals per question
+    dual_learning_rate: 0.01   # Learning rate for dual variables
+    use_curriculum: true       # Enable curriculum learning
+    curriculum_phases:
+      - phase: 0               # Early: learn format
+        max_retrievals: 1
+        format_weight: 1.2
+        info_weight: 0.8
+        answer_weight: 0.6
+      - phase: 1               # Middle: learn retrieval
+        max_retrievals: 3
+        format_weight: 1.0
+        info_weight: 1.2
+        answer_weight: 0.8
+      - phase: 2               # Late: optimize answers
+        max_retrievals: 5
+        format_weight: 0.9
+        info_weight: 1.0
+        answer_weight: 1.3
+  
+  # ═══════════════════════════════════════════════════════════
+  # 3. PCC: Process Credit Assignment
+  # ═══════════════════════════════════════════════════════════
+  pcc:
+    gamma: 0.95                # Discount factor for successor representation
+    hidden_dim: 4096           # Model hidden dimension
+    credit_predictor_lr: 1e-4  # Learning rate for credit predictor
+    use_token_level: true      # Enable per-token credit assignment
+  
+  # ═══════════════════════════════════════════════════════════
+  # 4. Meta-Cognitive Regularization
+  # ═══════════════════════════════════════════════════════════
+  meta_cog:
+    coherence_weight: 0.4      # Reasoning structure quality
+    query_quality_weight: 0.3  # Search query specificity
+    integration_weight: 0.3    # Retrieval result usage
+    calibration_weight: 0.2    # Confidence-accuracy calibration
+  
+  # ═══════════════════════════════════════════════════════════
+  # 5. Reward Coefficients
+  # ═══════════════════════════════════════════════════════════
+  reward_coeffs:
+    format: 1.0
+    information: 2.0           # Higher weight for IG (core innovation)
+    answer: 3.0
+    budget: 0.5
+    meta_cog: 0.5
+    process: 1.0
+
+# ── GRPO Configuration (standard) ────────────────────────────
+grpo:
+  group_size: 8
+  learning_rate: 5.0e-7
+  lr_scheduler_type: "cosine"
+  warmup_ratio: 0.05
+  num_train_epochs: 5          # More epochs for RISE curriculum
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 8
+  max_grad_norm: 1.0
+  kl_coeff: 0.04
+  clip_range: 0.2
+  vf_coeff: 0.0
+  temperature: 1.0
+  top_p: 0.95
+  use_reference_model: true
+
+# ── Semantic Judge ────────────────────────────────────────────
+judge:
+  em_weight: 0.20
+  rouge_weight: 0.25
+  bleu_weight: 0.15
+  fuzzy_weight: 0.20
+  semantic_weight: 0.20
+  threshold: 0.60
+  semantic_model: "BAAI/bge-base-en-v1.5"
+
+# ── Agent Configuration ─────────────────────────────────────
+agent:
+  system_prompt: |
+    You are an intelligent research assistant with access to multiple tools.
+    
+    Your task is to answer questions by using available tools when needed.
+    You should think step-by-step, use tools when uncertain, and provide well-reasoned answers.
+    
+    Available tools:
+    1. <search>query</search> - Retrieve external information from knowledge base.
+       Results appear as: <r>search results</r>
+    
+    2. <calculator>expression</calculator> - Perform mathematical calculations.
+       Results appear as: <c>calculation result</c>
+       Example: <calculator>sin(pi/4) + sqrt(16)</calculator>
+    
+    3. <code>python_code</code> - Execute Python code for complex computations.
+       Results appear as: <o>execution output</o>
+       Example: <code>sum([i**2 for i in range(10)])</code>
+    
+    4. <verify>claim</verify> - Verify a statement or claim.
+       Results appear as: <v>verification result</v>
+    
+    Output format:
+    <think>
+    Analyze the question. Identify what you know and what you need to find out.
+    Plan which tools to use and in what order.
+    </think>
+    <tool>your tool call here</tool>
+    <result_tag>tool result will appear here</result_tag>
+    ... (repeat think/tool as needed) ...
+    <think>
+    Synthesize all information and form your answer.
+    </think>
+    <answer>your concise, accurate answer</answer>
+    
+    Guidelines:
+    1. Think before using tools - don't use them for information you already know.
+    2. Tool inputs should be specific and targeted.
+    3. Each tool use should reduce your uncertainty.
+    4. Provide the final answer in <answer> tags.
+    5. Use calculator for math, code for complex logic, search for facts, verify for claims.
+  
+  max_search_calls: 5
+  
+  # Enabled tools
+  enable_tools:
+    - search
+    - calculator
+    - code
+    - verify
+  
+  # Tool-specific settings
+  tool_settings:
+    calculator:
+      precision: 6
+    code:
+      timeout: 5
+      max_output_chars: 2000
+    verify:
+      use_retriever: true
+
+# ── Training Infrastructure ───────────────────────────────────
+training:
+  output_dir: "outputs/rise/"
+  logging_dir: "outputs/rise/logs/"
+  save_steps: 100
+  eval_steps: 50
+  logging_steps: 10
+  save_total_limit: 5
+  seed: 42
+  bf16: true
+  tf32: true
+  dataloader_num_workers: 4
+  report_to: "wandb"
+  run_name: "rise-best-paper-v1"
+  deepspeed: "configs/ds_zero2.json"
+
+# ── Logging & Analysis ───────────────────────────────────────
+logging:
+  log_detailed_metrics: true
+  track_ig_trajectory: true
+  track_calibration: true
+  generate_paper_figures: true
+  figure_output_dir: "outputs/rise/figures/"

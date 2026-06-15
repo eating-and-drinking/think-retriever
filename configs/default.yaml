@@ -1,0 +1,150 @@
+# configs/default.yaml
+# ─────────────────────────────────────────────────────────────
+# Think-Retriever — default training configuration
+# ─────────────────────────────────────────────────────────────
+
+# ── Model ─────────────────────────────────────────────────────
+model:
+  name_or_path: "Qwen/Qwen2.5-7B-Instruct"
+  torch_dtype: "bfloat16"        # bfloat16 | float16 | float32
+  attn_implementation: "flash_attention_2"
+  trust_remote_code: true
+
+# ── Data ──────────────────────────────────────────────────────
+data:
+  train_path: "data/hotpot/train.jsonl"
+  eval_path:  "data/hotpot/eval.jsonl"
+  max_prompt_length: 512
+  max_completion_length: 1024
+  question_field: "question"
+  answer_field:   "answer"
+
+# ── Retrieval ─────────────────────────────────────────────────
+retriever:
+  type: "bm25"                   # bm25 | dense
+  corpus_path: "data/hotpot/corpus.jsonl"
+  top_k: 3
+  # Dense-only options:
+  dense:
+    encoder_name: "BAAI/bge-base-en-v1.5"
+    index_path: "data/faiss_index"
+    batch_size: 64
+
+# ── GRPO Hyper-parameters ─────────────────────────────────────
+grpo:
+  group_size: 8                  # G: number of samples per question
+  learning_rate: 5.0e-7
+  lr_scheduler_type: "cosine"
+  warmup_ratio: 0.05
+  num_train_epochs: 3
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 8
+  max_grad_norm: 1.0
+  kl_coeff: 0.04                 # KL divergence penalty coefficient β
+  clip_range: 0.2                # PPO clip ε
+  vf_coeff: 0.0                  # value function coefficient (0 = no critic)
+  temperature: 1.0               # sampling temperature during rollout
+  top_p: 0.95
+  use_reference_model: true      # freeze ref model for KL baseline
+
+# ── Reward ────────────────────────────────────────────────────
+reward:
+  # Stage-1: Format reward
+  format_correct: 1.0
+  format_wrong:   -1.0
+  # Stage-1: Tool-call reward
+  tool_call_used:   1.0
+  tool_call_unused: 0.0
+  # Stage-2: Answer reward
+  answer_correct:   1.0
+  answer_wrong:     0.0
+  # Stage-2: Budget constraint
+  retrieval_cost:   -0.1         # per retrieval call beyond the first
+  correct_refund:    0.5         # bonus when answer is correct
+
+# ── Semantic Judge ────────────────────────────────────────────
+judge:
+  # Voting ensemble weights (must sum to 1.0)
+  em_weight:     0.20            # exact match
+  rouge_weight:  0.25            # ROUGE-L F1
+  bleu_weight:   0.15            # BLEU-4
+  fuzzy_weight:   0.20            # RapidFuzz token-sort ratio
+  semantic_weight: 0.20          # sentence-transformer cosine sim
+  # Decision threshold
+  threshold: 0.60
+  # Semantic model for embedding-based similarity
+  semantic_model: "BAAI/bge-base-en-v1.5"
+
+# ── System Prompt / Tool Spec ─────────────────────────────────
+agent:
+  system_prompt: |
+    You are an intelligent question-answering agent with access to multiple tools.
+    
+    Available tools:
+    1. <search>query</search> - Retrieve information (results: <r>...</r>)
+    2. <calculator>expression</calculator> - Math calculations (results: <c>...</c>)
+    3. <code>python_code</code> - Execute code (results: <o>...</o>)
+    4. <verify>claim</verify> - Verify statements (results: <v>...</v>)
+    
+    Output format:
+    <think>Your step-by-step reasoning here. Explain what you need to do, which tool to use, and why.</think>
+    <tool>tool call</tool>
+    <result_tag>tool result appears here</result_tag>
+    ...
+    <answer>final answer</answer>
+    
+    Rules:
+    1. Always start with <think> to reason about the problem before using tools.
+    2. Use tools when needed, end with <answer>.
+    3. Do not fabricate tool results.
+    4. Choose the right tool: calculator for math, code for complex logic.
+    5. The <think> block should explain your reasoning process.
+  
+  max_search_calls: 5            # hard cap on total tool calls per episode
+  
+  # Enabled tools (subset: search, calculator, code, verify)
+  enable_tools:
+    - search
+    - calculator
+  
+  # Tool-specific settings
+  tool_settings:
+    calculator:
+      precision: 6
+    code:
+      timeout: 5
+      max_output_chars: 2000
+    verify:
+      use_retriever: true
+
+# ── Two-Stage Training ──────────────────────────────────────────
+# Stage 1: RPA (ReAct Protocol Alignment)
+stage1:
+  epochs: 2                      # Number of epochs for Stage 1
+  group_size: 8                 # G: samples per question in Stage 1
+  lr: 5.0e-7                    # Learning rate for Stage 1
+
+# Stage 2: Tree-Search GRPO
+stage2:
+  epochs: 1                      # Number of epochs for Stage 2
+  branching_factor: 4            # G: children expanded per parent node
+  max_depth: 3                   # Maximum search depth in the tree
+  stop_threshold: 0.9            # τ: stop expanding when probe_score >= τ
+  search_cost: 0.05             # λ: cost per search (subtracted from reward)
+  lr: 1.0e-7                    # Smaller LR for fine-tuning
+
+# ── Training Infrastructure ───────────────────────────────────
+training:
+  output_dir: "outputs/two_stage/"
+  logging_dir: "outputs/logs/"
+  save_steps: 100
+  eval_steps: 50
+  logging_steps: 10
+  save_total_limit: 3
+  seed: 42
+  bf16: true
+  tf32: true
+  dataloader_num_workers: 4
+  report_to: "wandb"             # none | wandb | tensorboard
+  run_name: "think-retriever-v1"
+  deepspeed: "configs/ds_zero2.json"

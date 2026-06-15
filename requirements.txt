@@ -1,0 +1,36 @@
+# Core ML
+torch>=2.1.0
+transformers>=4.40.0
+accelerate>=0.28.0
+trl>=0.9.0
+peft>=0.10.0
+deepspeed>=0.14.0
+
+# Retrieval
+rank-bm25>=0.2.2
+faiss-cpu>=1.7.4          # swap to faiss-gpu for GPU build
+sentence-transformers>=2.7.0
+
+# Reward / Judge
+nltk>=3.8.1
+rouge-score>=0.1.2
+sacrebleu>=2.4.0
+rapidfuzz>=3.6.0
+
+# Data & utilities
+datasets>=2.18.0
+numpy>=1.26.0
+pandas>=2.2.0
+pyyaml>=6.0.1
+tqdm>=4.66.0
+jsonlines>=4.0.0
+rich>=13.7.0
+
+# Dev / testing
+pytest>=8.1.0
+black>=24.3.0
+isort>=5.13.2
+mypy>=1.9.0
+
+# Optional: wandb logging
+wandb>=0.16.0
