@@ -3,8 +3,8 @@ from setuptools import setup, find_packages
 setup(
     name="think-retriever",
     version="0.1.0",
-    author="Your Name",
-    author_email="you@example.com",
+    author="eating-and-drinking",
+    author_email="2364718708@qq.com",
     description="Think-Retriever: An intelligent retrieval-augmented generation agent",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",

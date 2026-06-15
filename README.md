@@ -210,8 +210,9 @@ If you use this code in your research, please cite:
 ```bibtex
 @misc{think-retriever-2025,
   title  = {Think-Retriever: An intelligent retrieval-augmented generation agent},
+  author = {eating-and-drinking},
   year   = {2025},
-  url    = {https://github.com/your-org/think-retriever}
+  url    = {https://github.com/eating-and-drinking/think-retriever}
 }
 ```
 
