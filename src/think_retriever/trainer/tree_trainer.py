@@ -34,8 +34,8 @@ from transformers import (
     PreTrainedTokenizerBase,
 )
 
-from agentic_rag.judge.probe_evaluator import ProbeEvaluator
-from agentic_rag.trainer.tree_search_sampler import (
+from think_retriever.judge.probe_evaluator import ProbeEvaluator
+from think_retriever.trainer.tree_search_sampler import (
     SearchNode,
     TreeEpisode,
     TreeSearchSampler,

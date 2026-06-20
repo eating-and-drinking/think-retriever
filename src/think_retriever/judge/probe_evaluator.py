@@ -21,7 +21,7 @@ import logging
 from dataclasses import dataclass
 from typing import List, Optional
 
-from agentic_rag.judge.semantic_judge import SemanticJudge, JudgeResult
+from think_retriever.judge.semantic_judge import SemanticJudge, JudgeResult
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +141,7 @@ class ProbeEvaluator:
         cfg:
             Config dict with 'judge' and optionally 'probe' sections
         """
-        from agentic_rag.judge.semantic_judge import SemanticJudge
+        from think_retriever.judge.semantic_judge import SemanticJudge
 
         judge = SemanticJudge.from_config(cfg)
 

@@ -268,7 +268,7 @@ def compute_protocol_reward(
 
     # Check: answer_after_content
     answer_after_content = False
-    end_positions = [m.start() for m in re.finditer(r'<|im_end|>', completion)]
+    end_positions = [m.start() for m in re.finditer(r'<\|im_end\|>', completion)]
     if response_positions and end_positions:
         for end_pos in end_positions:
             for resp_pos in response_positions:

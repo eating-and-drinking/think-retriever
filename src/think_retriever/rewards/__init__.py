@@ -13,7 +13,7 @@ Stage 2 (PSCA-SGPO):
   * search     — knowledge gain minus search cost (ΔQ - λ)
 """
 
-from agentic_rag.rewards.two_stage_reward import (
+from think_retriever.rewards.two_stage_reward import (
     TwoStageRewardFn,
     TwoStageRewardBreakdown,
     FormatRewardResult,

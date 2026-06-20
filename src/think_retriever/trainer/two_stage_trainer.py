@@ -25,6 +25,7 @@ Key improvements from v1:
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -159,6 +160,61 @@ class QADataset(Dataset):
 # ── Stage 1: RPA Trainer ──────────────────────────────────────────────────────
 
 
+_TOOL_RESPONSE_RE = re.compile(r"<tool_response>.*?</tool_response>", re.DOTALL)
+
+
+def _build_ids_and_mask(
+    question: str,
+    completion: str,
+    tokenizer: PreTrainedTokenizerBase,
+) -> Tuple[List[int], List[int]]:
+    """Tokenise prompt + completion and build a per-token "generated" mask.
+
+    The mask is 1 for tokens the model generated (its <think>/<tool_call>/
+    <answer> text) and 0 for the prompt and for environment-injected
+    <tool_response> blocks, so the GRPO loss only credits the policy's own
+    tokens.
+    """
+    if hasattr(tokenizer, "apply_chat_template"):
+        prompt_text = tokenizer.apply_chat_template(
+            [{"role": "user", "content": question}],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+    else:
+        prompt_text = f"{question}\n"
+
+    token_ids: List[int] = list(tokenizer(prompt_text, add_special_tokens=False).input_ids)
+    mask: List[int] = [0] * len(token_ids)
+
+    # Split the completion into generated segments and injected tool-response
+    # segments, tokenising each separately so the mask stays aligned.
+    pos = 0
+    for m in _TOOL_RESPONSE_RE.finditer(completion):
+        if m.start() > pos:
+            _append_segment(completion[pos:m.start()], True, token_ids, mask, tokenizer)
+        _append_segment(completion[m.start():m.end()], False, token_ids, mask, tokenizer)
+        pos = m.end()
+    if pos < len(completion):
+        _append_segment(completion[pos:], True, token_ids, mask, tokenizer)
+
+    return token_ids, mask
+
+
+def _append_segment(
+    text: str,
+    is_generated: bool,
+    token_ids: List[int],
+    mask: List[int],
+    tokenizer: PreTrainedTokenizerBase,
+) -> None:
+    if not text:
+        return
+    seg_ids = tokenizer(text, add_special_tokens=False).input_ids
+    token_ids.extend(seg_ids)
+    mask.extend([1 if is_generated else 0] * len(seg_ids))
+
+
 def compute_rpa_loss(
     episodes: List[Episode],
     rewards: List[float],
@@ -187,31 +243,36 @@ def compute_rpa_loss(
     total_loss = torch.tensor(0.0, device=model.device)
     n_samples = 0
     
+    max_len = config.max_prompt_length + config.max_completion_length
+
     for episode, adv in zip(episodes, advantages):
         if abs(adv) < 1e-6:
             continue
-        
-        prompt = episode.completion[:100]  # Simplified: use completion directly
-        full_text = prompt + episode.completion
-        
-        enc = tokenizer(
-            full_text,
-            return_tensors="pt",
-            truncation=True,
-            max_length=config.max_prompt_length + config.max_completion_length,
-        ).to(model.device)
-        
-        input_ids = enc.input_ids
-        
+
+        # Reconstruct the prompt that preceded the completion so its tokens can
+        # be masked out of the loss — GRPO must only train on tokens the model
+        # actually generated, never on the prompt or environment-injected
+        # <tool_response> blocks.
+        token_ids, gen_mask = _build_ids_and_mask(
+            episode.question, episode.completion, tokenizer
+        )
+        if not any(gen_mask):
+            continue
+
+        input_ids = torch.tensor([token_ids[:max_len]], device=model.device)
+        # Mask is aligned to next-token targets (positions 1..L-1).
+        mask = torch.tensor(gen_mask[:max_len], dtype=torch.float32, device=model.device)
+
         with torch.enable_grad():
             logits = model(input_ids=input_ids).logits
-        
+
         log_probs = F.log_softmax(logits[0, :-1, :], dim=-1)
         targets = input_ids[0, 1:]
-        
+        target_mask = mask[1:]
+
         gathered = log_probs.gather(dim=-1, index=targets.unsqueeze(-1)).squeeze(-1)
-        loss = -float(adv) * gathered.sum()
-        
+        loss = -float(adv) * (gathered * target_mask).sum()
+
         total_loss = total_loss + loss
         n_samples += 1
     
@@ -605,6 +666,21 @@ class TwoStageTrainer:
         self.model.save_pretrained(path)
         self.tokenizer.save_pretrained(path)
         logger.info("Saved checkpoint to %s", path)
+        self._enforce_save_limit()
+
+    def _enforce_save_limit(self) -> None:
+        """Keep at most ``save_total_limit`` checkpoint dirs, deleting the oldest."""
+        limit = self.cfg.save_total_limit
+        if not limit or limit <= 0:
+            return
+        out = Path(self.cfg.output_dir)
+        checkpoints = [p for p in out.iterdir() if p.is_dir() and p.name != "final"]
+        if len(checkpoints) <= limit:
+            return
+        checkpoints.sort(key=lambda p: p.stat().st_mtime)
+        for stale in checkpoints[:-limit]:
+            shutil.rmtree(stale, ignore_errors=True)
+            logger.info("Removed old checkpoint %s", stale)
 
     def _log(self, metrics: Dict) -> None:
         msg = " | ".join(

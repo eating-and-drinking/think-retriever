@@ -34,7 +34,7 @@ from transformers import (
 )
 
 from think_retriever.tools import Calculator, CodeExecutor, ToolRegistry, Verifier
-from think_retriever.tools.tool_registry import ExecutionResult
+from think_retriever.tools.tool_registry import ExecutionResult, ToolCallParse
 
 logger = logging.getLogger(__name__)
 
@@ -441,8 +441,7 @@ This is a math problem so I should use the calculator tool.</think>
 
                 # Execute tool
                 exec_result = self.tool_registry.execute(
-                    name=tool_name,
-                    arguments=arguments,
+                    ToolCallParse(name=tool_name, arguments=arguments)
                 )
 
                 record = ToolCallRecord(
@@ -466,15 +465,6 @@ This is a math problem so I should use the calculator tool.</think>
                 # PSCA-SGPO: Probe mechanism for search tools
                 if enable_probe and tool_name == "search" and self.probe_evaluator:
                     search_depth += 1
-
-                    # Build context for probe
-                    probe_context = working_text.replace(
-                        _TOOL_RESPONSE_START + json.dumps({
-                            "success": True,
-                            "result": exec_result.result
-                        }) + _TOOL_RESPONSE_END,
-                        ""
-                    )
 
                     # Extract current answer (before adding response to model)
                     # This simulates the Probe: model must answer immediately

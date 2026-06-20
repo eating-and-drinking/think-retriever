@@ -4,11 +4,14 @@ tools/__init__.py
 Tool registry for function calling.
 """
 
-from agentic_rag.tools.tool_registry import (
+from think_retriever.tools.tool_registry import (
+    Calculator,
+    CodeExecutor,
     ExecutionResult,
     FunctionSpec,
     ToolCallParse,
     ToolRegistry,
+    Verifier,
 )
 
 __all__ = [
@@ -16,4 +19,7 @@ __all__ = [
     "FunctionSpec",
     "ToolCallParse",
     "ExecutionResult",
+    "Calculator",
+    "CodeExecutor",
+    "Verifier",
 ]

@@ -19,8 +19,12 @@ broader tool use.
 
 from __future__ import annotations
 
+import ast
+import contextlib
+import io
 import json
 import logging
+import operator
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
@@ -69,7 +73,7 @@ class ToolCallParse:
 
     name: str
     arguments: Dict[str, Any]
-    span: tuple              # (start, end) character offsets in source text
+    span: tuple = (0, 0)     # (start, end) character offsets in source text
     raw_json: str = ""
 
 
@@ -292,3 +296,82 @@ class ToolRegistry:
     def format_response(self, exec_result: ExecutionResult) -> str:
         """Wrap an execution result in a <tool_response> block ready for re-injection."""
         return f"\n<tool_response>\n{exec_result.to_response_payload()}\n</tool_response>\n"
+
+
+# ── Built-in tool implementations ──────────────────────────────────────────────
+
+
+class Calculator:
+    """Safely evaluate an arithmetic expression via the ``ast`` module.
+
+    Only numeric literals and the basic binary/unary operators are allowed;
+    arbitrary names, calls and attribute access are rejected, so this is safe
+    to expose to model-generated input.
+    """
+
+    _BIN_OPS = {
+        ast.Add: operator.add,
+        ast.Sub: operator.sub,
+        ast.Mult: operator.mul,
+        ast.Div: operator.truediv,
+        ast.FloorDiv: operator.floordiv,
+        ast.Mod: operator.mod,
+        ast.Pow: operator.pow,
+    }
+    _UNARY_OPS = {
+        ast.USub: operator.neg,
+        ast.UAdd: operator.pos,
+    }
+
+    def execute(self, expression: str) -> str:
+        try:
+            value = self._eval(ast.parse(expression, mode="eval").body)
+        except Exception as exc:  # noqa: BLE001 - surface as tool error string
+            return f"Error: {exc}"
+        return str(value)
+
+    def _eval(self, node: ast.AST) -> Any:
+        if isinstance(node, ast.Constant):
+            if isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
+                return node.value
+            raise ValueError(f"unsupported constant: {node.value!r}")
+        if isinstance(node, ast.BinOp) and type(node.op) in self._BIN_OPS:
+            return self._BIN_OPS[type(node.op)](self._eval(node.left), self._eval(node.right))
+        if isinstance(node, ast.UnaryOp) and type(node.op) in self._UNARY_OPS:
+            return self._UNARY_OPS[type(node.op)](self._eval(node.operand))
+        raise ValueError("unsupported expression")
+
+
+class CodeExecutor:
+    """Execute a snippet of Python and capture its stdout.
+
+    Note: this runs the code in-process and is NOT a security sandbox. It is
+    intended for trusted/research use where the model's code is not adversarial.
+    """
+
+    def execute(self, code: str) -> str:
+        buffer = io.StringIO()
+        namespace: Dict[str, Any] = {}
+        try:
+            with contextlib.redirect_stdout(buffer):
+                exec(code, namespace)  # noqa: S102 - intentional, see docstring
+        except Exception as exc:  # noqa: BLE001 - surface as tool error string
+            return f"Error: {type(exc).__name__}: {exc}"
+        output = buffer.getvalue().strip()
+        return output if output else "(no output)"
+
+
+class Verifier:
+    """Fact-check a claim against the corpus using the retriever as evidence."""
+
+    def __init__(self, retriever: Any = None) -> None:
+        self.retriever = retriever
+
+    def execute(self, claim: str) -> str:
+        if self.retriever is None:
+            return "Cannot verify: no retriever available."
+        try:
+            evidence = self.retriever.search(claim)
+        except Exception as exc:  # noqa: BLE001 - surface as tool error string
+            return f"Error: {type(exc).__name__}: {exc}"
+        return f"Claim: {claim}\nRetrieved evidence: {evidence}"
