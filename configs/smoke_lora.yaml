@@ -1,0 +1,38 @@
+# Tiny config to validate the official train_two_stage.py entrypoint with LoRA.
+model:
+  name_or_path: "/home/yons/file/firedog/Qwen2.5-3B-Instruct"
+  torch_dtype: "bfloat16"
+  attn_implementation: "sdpa"        # flash-attn not installed on this box
+
+data:
+  max_prompt_length: 512
+  max_completion_length: 192         # keep generation short for the smoke run
+
+lora:
+  enabled: true
+  r: 8
+  alpha: 16
+  dropout: 0.0
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
+
+stage1:
+  epochs: 1
+  group_size: 4
+  lr: 1.0e-4
+
+stage2:
+  epochs: 1
+  branching_factor: 2
+  max_depth: 1
+  stop_threshold: 0.9
+  search_cost: 0.05
+  lr: 1.0e-4
+
+training:
+  output_dir: "outputs/smoke_lora_entrypoint/"
+  grad_accum: 1
+  logging_steps: 1
+  save_steps: 10000
+  eval_steps: 10000
+  report_to: "none"
+  seed: 0

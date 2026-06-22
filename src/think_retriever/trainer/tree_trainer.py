@@ -175,7 +175,9 @@ def compute_tree_loss(
             
             # ---- A. Think + Search tokens （从搜索采样时已保存 input_ids）----
             if node.input_ids is not None and node.generation_start_pos > 0:
-                input_ids = node.input_ids.to(model.device)
+                # .clone() converts the inference-mode tensor (produced during
+                # sampling) into a normal tensor that autograd can save for backward.
+                input_ids = node.input_ids.to(model.device).clone()
                 gen_start = node.generation_start_pos
                 
                 with torch.enable_grad():

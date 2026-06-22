@@ -1,0 +1,35 @@
+# Full fine-tuning config for Qwen2.5-3B (now that the GPU is free).
+# Full-parameter GRPO with gradient checkpointing to keep activation memory in check.
+model:
+  name_or_path: "/home/yons/file/firedog/Qwen2.5-3B-Instruct"
+  torch_dtype: "bfloat16"
+  attn_implementation: "sdpa"        # flash-attn not installed on this box
+
+data:
+  max_prompt_length: 512
+  max_completion_length: 384
+
+stage1:
+  epochs: 3
+  group_size: 4                      # GRPO group; accumulated graph held per step
+  lr: 1.0e-6
+
+stage2:
+  epochs: 2
+  branching_factor: 4
+  max_depth: 2
+  stop_threshold: 0.9
+  search_cost: 0.05
+  lr: 5.0e-7
+
+training:
+  output_dir: "outputs/full_ft/"
+  grad_accum: 2
+  gradient_checkpointing: true
+  max_grad_norm: 1.0
+  logging_steps: 1
+  eval_steps: 6
+  save_steps: 10000                  # only save per-epoch + final for this run
+  save_total_limit: 3
+  report_to: "none"
+  seed: 42

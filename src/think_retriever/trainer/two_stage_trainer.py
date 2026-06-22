@@ -63,6 +63,13 @@ class TwoStageConfig:
     torch_dtype: str = "bfloat16"
     attn_implementation: str = "flash_attention_2"
 
+    # LoRA (optional — enables low-memory training; base model stays frozen)
+    use_lora: bool = False
+    lora_r: int = 16
+    lora_alpha: int = 32
+    lora_dropout: float = 0.05
+    lora_target_modules: tuple = ("q_proj", "k_proj", "v_proj", "o_proj")
+
     # Stage 1: RPA (ReAct Protocol Alignment)
     stage1_epochs: int = 2
     stage1_group_size: int = 8
@@ -78,6 +85,7 @@ class TwoStageConfig:
 
     # Common
     per_device_batch_size: int = 1
+    gradient_checkpointing: bool = False  # trade compute for activation memory
     gradient_accumulation_steps: int = 8
     max_grad_norm: float = 1.0
     clip_range: float = 0.2
@@ -104,11 +112,17 @@ class TwoStageConfig:
         training = d.get("training", {})
         stage1 = d.get("stage1", {})
         stage2 = d.get("stage2", {})
+        lora = d.get("lora", {})
 
         return cls(
             model_name_or_path=model.get("name_or_path", cls.model_name_or_path),
             torch_dtype=model.get("torch_dtype", cls.torch_dtype),
             attn_implementation=model.get("attn_implementation", cls.attn_implementation),
+            use_lora=lora.get("enabled", cls.use_lora),
+            lora_r=lora.get("r", cls.lora_r),
+            lora_alpha=lora.get("alpha", cls.lora_alpha),
+            lora_dropout=lora.get("dropout", cls.lora_dropout),
+            lora_target_modules=tuple(lora.get("target_modules", cls.lora_target_modules)),
             stage1_epochs=stage1.get("epochs", cls.stage1_epochs),
             stage1_group_size=stage1.get("group_size", cls.stage1_group_size),
             stage1_lr=stage1.get("lr", cls.stage1_lr),
@@ -119,6 +133,7 @@ class TwoStageConfig:
             stage2_search_cost=stage2.get("search_cost", cls.stage2_search_cost),
             stage2_lr=stage2.get("lr", cls.stage2_lr),
             per_device_batch_size=training.get("batch_size", cls.per_device_batch_size),
+            gradient_checkpointing=training.get("gradient_checkpointing", cls.gradient_checkpointing),
             gradient_accumulation_steps=training.get("grad_accum", cls.gradient_accumulation_steps),
             max_grad_norm=training.get("max_grad_norm", cls.max_grad_norm),
             clip_range=training.get("clip_range", cls.clip_range),
@@ -276,14 +291,59 @@ def compute_rpa_loss(
         total_loss = total_loss + loss
         n_samples += 1
     
-    avg_loss = total_loss / max(n_samples, 1)
-    
+    if n_samples > 0:
+        avg_loss = total_loss / n_samples
+    else:
+        # No sample contributed (e.g. zero-variance group) — return a grad-safe
+        # zero so an unconditional .backward() upstream won't crash.
+        avg_loss = torch.zeros((), device=model.device, requires_grad=True)
+
     return avg_loss, {
         "stage1/loss": avg_loss.item(),
         "stage1/num_samples": n_samples,
         "stage1/mu_reward": mu.item(),
         "stage1/sigma_reward": sigma.item(),
     }
+
+
+# ── LoRA helper ───────────────────────────────────────────────────────────────
+
+
+def apply_lora(model: PreTrainedModel, config: TwoStageConfig) -> PreTrainedModel:
+    """Wrap ``model`` in a LoRA adapter and configure it for grad-checkpointed
+    training of the adapter only (base stays frozen).
+
+    Returns the original model unchanged if ``config.use_lora`` is False.
+    """
+    if not config.use_lora:
+        return model
+
+    try:
+        from peft import LoraConfig, get_peft_model
+    except ImportError as exc:  # pragma: no cover - depends on optional dep
+        raise ImportError(
+            "use_lora=True requires the 'peft' package. Install it with "
+            "`pip install peft`."
+        ) from exc
+
+    lora_cfg = LoraConfig(
+        r=config.lora_r,
+        lora_alpha=config.lora_alpha,
+        lora_dropout=config.lora_dropout,
+        target_modules=list(config.lora_target_modules),
+        task_type="CAUSAL_LM",
+    )
+    model = get_peft_model(model, lora_cfg)
+    model.print_trainable_parameters()
+
+    # Grad checkpointing keeps activation memory low; use_reentrant=False is
+    # required so grads still reach the LoRA params through the frozen base.
+    model.config.use_cache = False
+    model.gradient_checkpointing_enable(
+        gradient_checkpointing_kwargs={"use_reentrant": False}
+    )
+    model.enable_input_require_grads()
+    return model
 
 
 # ── Two-Stage Trainer ─────────────────────────────────────────────────────────
@@ -315,9 +375,12 @@ class TwoStageTrainer:
         self.cfg = config
         self._global_step = 0
 
-        # Optimizer (shared across stages, LR adjusted per stage)
+        # Optimizer (shared across stages, LR adjusted per stage).
+        # Only optimise params that require grad — this keeps AdamW state tiny
+        # when the model is a frozen base + LoRA adapter.
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
         self.optimizer = torch.optim.AdamW(
-            model.parameters(),
+            trainable_params,
             lr=config.stage1_lr,
             betas=(0.9, 0.999),
             eps=1e-8,
@@ -442,7 +505,10 @@ class TwoStageTrainer:
                         config=self.cfg,
                     )
 
-                    (loss / self.cfg.gradient_accumulation_steps).backward()
+                    # A group with no reward variance yields all-zero advantages
+                    # and a loss with no grad path; skip backward in that case.
+                    if loss.requires_grad:
+                        (loss / self.cfg.gradient_accumulation_steps).backward()
                     accum += 1
 
                     if accum % self.cfg.gradient_accumulation_steps == 0:
@@ -568,7 +634,8 @@ class TwoStageTrainer:
                         config=self.cfg,
                     )
 
-                    (loss / self.cfg.gradient_accumulation_steps).backward()
+                    if loss.requires_grad:
+                        (loss / self.cfg.gradient_accumulation_steps).backward()
                     accum += 1
 
                     if accum % self.cfg.gradient_accumulation_steps == 0:

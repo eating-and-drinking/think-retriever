@@ -35,7 +35,12 @@ from think_retriever.agent.qwen_style_agent import QwenStyleAgent
 from think_retriever.judge.probe_evaluator import ProbeEvaluator
 from think_retriever.judge.semantic_judge import SemanticJudge
 from think_retriever.rewards.two_stage_reward import TwoStageRewardFn
-from think_retriever.trainer.two_stage_trainer import QADataset, TwoStageConfig, TwoStageTrainer
+from think_retriever.trainer.two_stage_trainer import (
+    QADataset,
+    TwoStageConfig,
+    TwoStageTrainer,
+    apply_lora,
+)
 from think_retriever.trainer.tree_search_sampler import TreeSearchSampler
 from think_retriever.utils.logging_utils import setup_logging
 
@@ -105,6 +110,7 @@ def main() -> None:
     parser.add_argument("--grad_accum", type=int, default=None)
     parser.add_argument("--log_level", type=str, default="INFO")
     parser.add_argument("--fp16", action="store_true")
+    parser.add_argument("--use_lora", action="store_true", help="Train a LoRA adapter instead of full fine-tuning.")
     
     args = parser.parse_args()
     setup_logging(level=args.log_level)
@@ -146,6 +152,8 @@ def main() -> None:
         cfg.stage2_epochs = max(1, args.epochs // 2)
     if args.grad_accum:
         cfg.gradient_accumulation_steps = args.grad_accum
+    if args.use_lora:
+        cfg.use_lora = True
     
     logger.info("Two-Stage Config:\n%s", json.dumps(vars(cfg), indent=2, default=str))
     torch.manual_seed(cfg.seed)
@@ -166,29 +174,51 @@ def main() -> None:
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_name_or_path, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    
-    model = AutoModelForCausalLM.from_pretrained(
-        cfg.model_name_or_path,
+
+    # Load the base model; fall back to SDPA attention if flash-attn is unavailable.
+    load_kwargs = dict(
         torch_dtype=dtype,
         device_map="auto",
         trust_remote_code=True,
+        attn_implementation=cfg.attn_implementation,
     )
-    
+    try:
+        model = AutoModelForCausalLM.from_pretrained(cfg.model_name_or_path, **load_kwargs)
+    except (ImportError, ValueError) as exc:
+        logger.warning(
+            "Failed to load with attn_implementation=%s (%s); retrying with 'sdpa'.",
+            cfg.attn_implementation, exc,
+        )
+        load_kwargs["attn_implementation"] = "sdpa"
+        model = AutoModelForCausalLM.from_pretrained(cfg.model_name_or_path, **load_kwargs)
+
+    # Optionally wrap in LoRA (low-memory training; no-op when cfg.use_lora is False).
+    model = apply_lora(model, cfg)
+
+    # Full fine-tuning with gradient checkpointing (apply_lora already handles
+    # checkpointing for the LoRA path).
+    if cfg.gradient_checkpointing and not cfg.use_lora:
+        model.config.use_cache = False
+        model.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False}
+        )
+
     # Initialize components
     retriever = BM25Retriever()
     semantic_judge = SemanticJudge(threshold=cfg.stage2_stop_threshold)
     probe_eval = ProbeEvaluator(judge=semantic_judge, weight=1.0)
-    reward_fn = TwoStageRewardFn(probe_evaluator=probe_eval)
-    
+    reward_fn = TwoStageRewardFn(judge=semantic_judge)
+
     # Stage 1 Agent (Qwen style)
     agent = QwenStyleAgent(
         model=model,
         tokenizer=tokenizer,
         retriever=retriever,
-        judge=semantic_judge,
+        max_new_tokens=cfg.max_completion_length,
         temperature=cfg.temperature,
         top_p=cfg.top_p,
-        max_completion_length=cfg.max_completion_length,
+        enable_tools=["search"],
+        probe_evaluator=probe_eval,
     )
     
     # Stage 2 Tree Sampler
@@ -217,7 +247,7 @@ def main() -> None:
     )
     
     # Start training
-    trainer.train(dataset=train_ds, eval_dataset=eval_ds)
+    trainer.train(train_dataset=train_ds, eval_dataset=eval_ds)
     logger.info("Two-stage training complete!")
 
 
